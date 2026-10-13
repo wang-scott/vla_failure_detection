@@ -1,0 +1,17 @@
+# 由 setup.sh 產生／下載，不放進 git
+/bin/
+/env/
+/micromamba/
+/downloads/
+/nvidia-gl/
+/lerobot/
+/LIBERO-plus/
+
+# 評測輸出：大型特徵檔與每批原始結果（只保留彙整後的 summary.md / results.csv / plan.json）
+/eval_pi0fast/outputs/*/
+/eval_pi0fast/outputs/*.npz
+/eval_pi0fast/outputs/*.npy
+/eval_pi0fast/smoke*/
+
+__pycache__/
+*.pyc
