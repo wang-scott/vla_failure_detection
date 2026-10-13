@@ -87,14 +87,14 @@ python eval_pi0fast_libero_plus.py --analyze-only
 ### 2. 失敗偵測
 
 ```bash
-# 以回合平均特徵訓練失敗偵測器
-python train_failure_detector.py --feature lm_mean
+# 單一層：印出各 alpha 與各 suite 的偵測結果
+python online_failure_detector.py --feature lm_mean --layer 10 --xlsx online_detection_lm_mean_L10.xlsx
 
-# 線上（逐 chunk）失敗偵測，掃描各層並輸出 Excel
-python online_failure_detector.py --feature lm_mean --sweep --xlsx out.xlsx
+# 逐層掃描並輸出 Excel
+python online_failure_detector.py --feature lm_mean --sweep --xlsx layer_sweep_lm_mean.xlsx
 ```
 
-這兩個腳本需要先用 `--save-features` 跑完評測。
+需要先用 `--bddl-labels --save-features` 跑完評測。
 
 ### 3. 查看 npz 特徵檔
 
@@ -112,15 +112,74 @@ python online_failure_detector.py --feature lm_mean --sweep --xlsx out.xlsx
 └── eval_pi0fast/
     ├── eval_pi0fast_libero_plus.py   # 評測主程式
     ├── lerobot_eval_bddl.py          # 包裝 lerobot-eval，輸出 BDDL 標籤與特徵
-    ├── bddl_labels.py
-    ├── pi0fast_features.py           # 擷取 pi0-FAST 內部特徵
-    ├── train_failure_detector.py
-    ├── online_failure_detector.py
-    ├── view_npz.py
+    ├── bddl_labels.py                # 依 BDDL 目標條件產生成功／失敗標籤
+    ├── pi0fast_features.py           # 擷取 pi0-FAST 各層特徵
+    ├── online_failure_detector.py    # 逐 chunk 的線上失敗偵測
+    ├── view_npz.py                   # 印出 npz 檔內容
     └── outputs/                      # 只保留彙整結果；特徵檔與原始輸出不進 git
 ```
 
 以下內容由 `setup.sh` 產生，不放進 git：`bin/`、`env/`、`micromamba/`、`lerobot/`、`LIBERO-plus/`、`nvidia-gl/`。
+
+## 程式說明
+
+各程式的呼叫關係：
+
+```
+eval_pi0fast_libero_plus.py  ──(subprocess 分批呼叫)──▶  lerobot_eval_bddl.py
+                                                          ├─ bddl_labels.py      → chunk_*_bddl/*.npz
+                                                          └─ pi0fast_features.py → chunk_*_features/*.npz
+                                                                     │
+                                          online_failure_detector.py ◀──┘
+```
+
+### `eval_pi0fast_libero_plus.py`：評測主程式
+
+- 讀取 LIBERO-plus 的 `task_classification.json`，依**擾動類別**分層抽樣任務。LIBERO-plus 有 7 種擾動類別、5 種難度，每個 suite 約 2400 個任務，全部跑完要好幾天，所以預設只抽樣（`--per-category N`），`--all` 才會全部跑。
+- 把任務分批（`--chunk-size`），每批用 subprocess 呼叫 `lerobot_eval_bddl.py`，並設定好 `PYTHONPATH`、`LD_PRELOAD`、EGL 等環境變數。每批的輸出放在 `outputs/<suite>/chunk_XXXX/`，log 放在 `chunk_XXXX.log`。
+- 中斷後用相同參數重跑，會跳過已完成的批次。
+- 全部跑完後彙整結果，輸出 `outputs/results.csv`（每個 episode 一列）和 `outputs/summary.md`（依 suite、擾動類別、難度統計成功率）。加 `--bddl-labels` 時，成功與否以 BDDL 標籤為準。
+- 主要參數：`--suites`、`--per-category`、`--all`、`--chunk-size`、`--bddl-labels`、`--save-features`、`--output-dir`、`--analyze-only`。
+
+### `lerobot_eval_bddl.py`：加上記錄功能的 lerobot-eval
+
+用法和 `lerobot-eval` 一樣，但會依環境變數額外記錄資料：
+
+- 有設定 `BDDL_LABEL_DIR`：載入 `bddl_labels.py`，輸出每個 rollout 的成功／失敗標籤
+- 有設定 `FEATURE_DIR`：載入 `pi0fast_features.py`，輸出 pi0-FAST 各層特徵
+
+必須搭配 `--eval.batch_size=1`。這兩個環境變數由 `eval_pi0fast_libero_plus.py` 依 `--bddl-labels`、`--save-features` 自動設定，通常不需要直接執行這個檔案。
+
+### `bddl_labels.py`：BDDL 成功標籤
+
+替換 lerobot `LiberoEnv` 的 `reset`、`step`，每一步都用 BDDL 的 `goal_state` 檢查是否所有目標條件都成立。只要任一步全部成立，就記為成功。episode 結束時存成 `<suite>_<task_id>_ep<k>.npz`，內容只有 `label`（`True` = 成功）。它也負責提供目前的 rollout 名稱和步數給 `pi0fast_features.py`。
+
+### `pi0fast_features.py`：擷取模型內部特徵
+
+pi0-FAST 每 10 步呼叫一次 `predict_action_chunk`，這時會對 prefix（3 張影像 × 256 patch + 指令 + BOS）做一次 prefill。這個檔案用 hook 擷取 prefill 階段每一層的輸出，每個 rollout 存成一個 npz（C = chunk 數，約等於步數 / 10）：
+
+| 鍵 | 形狀 | 內容 |
+|---|---|---|
+| `step` | (C,) | 每個 chunk 開始時的環境步數 |
+| `lm_last` | (C, 18, 2048) | Gemma 每層在最後一個 prefix token（BOS）的輸出 |
+| `lm_mean` | (C, 18, 2048) | Gemma 每層對所有有效 prefix token 取平均 |
+| `vision_mean` | (C, 3, 27, 1152) | SigLIP 每層對 256 個 patch 取平均，3 台相機依序是：主視角、手腕、空白 |
+
+### `online_failure_detector.py`：線上失敗偵測（逐 chunk）
+
+模擬執行過程中即時偵測：每個 chunk 只用「到目前為止」的特徵給出失敗分數，評估能多早發現失敗。
+
+1. **分數**：時間 t 的輸入是前 t+1 個 chunk 特徵的平均（嚴格因果），由 MLP 輸出失敗分數。
+2. **門檻**：在訓練折內做 inner CV，以 conformal 分位數決定門檻，使成功 episode 在任何時刻被誤報的比例 ≤ α（`--alphas`，預設 0.05、0.1、0.2）。
+3. **偵測**：測試時第一次分數超過門檻的 chunk，就是偵測時間。
+
+模型是標準化 → 一層隱藏層的 MLP。評估使用依「suite × 成功/失敗」分層的 5-fold 交叉驗證，重複 `--repeats` 次取平均。特徵用 `--feature`（`lm_last` / `lm_mean` / `vision_mean`）和 `--layer` 選擇。
+
+輸出偵測率、誤報率、偵測時間（chunk 數，以及佔 timeout 的比例）、早期偵測分數、逐時間 AUROC 等指標。`--sweep` 逐層比較，`--xlsx` 把結果寫成 Excel，例如 `layer_sweep_lm_mean.xlsx`、`online_detection_lm_mean_L10.xlsx`。第一次執行時會建立快取 `outputs/chunk_features_<feature>.npy`。
+
+### `view_npz.py`：查看 npz 內容
+
+印出 `.npz` 裡每個陣列的名稱、形狀、dtype 和數值。可以用 `--key` 只看某個陣列、`--index` 只看第一軸的某一筆、`--full` 完整印出不省略、`--precision` 設定小數位數。
 
 ## 已知問題
 

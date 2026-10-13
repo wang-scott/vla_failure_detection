@@ -23,8 +23,73 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 
-from train_failure_detector import ROOT, auroc, load_dataset, stratified_folds, train_mlp
+ROOT = Path(__file__).parent / "outputs"
+
+
+def load_dataset():
+    """依 outputs/results.csv 的順序，回傳 label (N,)（True = 成功）、n_chunks (N,)、suite (N,)、category (N,)。"""
+    rows = list(csv.DictReader(open(ROOT / "results.csv")))
+    feat_files = {Path(f).stem: f for f in glob.glob(str(ROOT / "*/chunk_*_features/*.npz"))}
+    label_files = {Path(f).stem: f for f in glob.glob(str(ROOT / "*/chunk_*_bddl/*.npz"))}
+    out = {"label": [], "n_chunks": [], "suite": [], "category": []}
+    for r in rows:
+        key = f"{r['suite']}_{r['task_id']}_ep{r['episode']}"
+        out["label"].append(bool(np.load(label_files[key])["label"][0]))
+        out["n_chunks"].append(len(np.load(feat_files[key])["step"]))
+        out["suite"].append(r["suite"])
+        out["category"].append(r["category"])
+    return {k: np.array(v) for k, v in out.items()}
+
+
+def auroc(y, s):
+    """Mann-Whitney U 形式的 AUROC（平手算 0.5）。"""
+    y = np.asarray(y, bool)
+    pos, neg = s[y], s[~y]
+    if len(pos) == 0 or len(neg) == 0:
+        return float("nan")
+    return float(((pos[:, None] > neg[None]).sum() + 0.5 * (pos[:, None] == neg[None]).sum()) / (len(pos) * len(neg)))
+
+
+def stratified_folds(strata, k, seed):
+    rng = np.random.default_rng(seed)
+    fold = np.empty(len(strata), int)
+    for s in np.unique(strata):
+        idx = rng.permutation(np.where(strata == s)[0])
+        fold[idx] = np.arange(len(idx)) % k
+    return fold
+
+
+def train_mlp(x_tr, y_tr, x_te, w_tr, args, device):
+    """標準化 -> MLP，以每個樣本的權重 w_tr（已含類別平衡）訓練，回傳 x_te 的 logit
+    （不會像 sigmoid 在 float32 下飽和成 1.0，適合取分位數當門檻）。"""
+    mu, sd = x_tr.mean(0), x_tr.std(0) + 1e-6
+    x_tr = torch.tensor((x_tr - mu) / sd, device=device)
+    x_te = torch.tensor((x_te - mu) / sd, device=device)
+    y_tr = torch.tensor(y_tr, dtype=torch.float32, device=device)
+    w_tr = torch.tensor(w_tr, dtype=torch.float32, device=device)
+    model = nn.Sequential(
+        nn.Dropout(args.input_dropout),
+        nn.Linear(x_tr.shape[1], args.hidden),
+        nn.ReLU(),
+        nn.Dropout(0.5),
+        nn.Linear(args.hidden, 1),
+    ).to(device)
+    loss_fn = nn.BCEWithLogitsLoss(reduction="none")
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    for _ in range(args.epochs):
+        model.train()
+        perm = torch.randperm(len(x_tr), device=device)
+        for i in range(0, len(perm), args.batch_size):
+            b = perm[i : i + args.batch_size]
+            opt.zero_grad()
+            loss = (loss_fn(model(x_tr[b]).squeeze(1), y_tr[b]) * w_tr[b]).mean()
+            loss.backward()
+            opt.step()
+    model.eval()
+    with torch.no_grad():
+        return model(x_te).squeeze(1).cpu().numpy()
 
 
 def load_chunk_features(feature, data):
@@ -63,7 +128,7 @@ def fit_predict(P, n, fail, tr, te, args, device):
     w = np.repeat(1.0 / n[tr], n[tr])  # 每個 episode 總權重相同
     w[y_tr == 1] *= w[y_tr == 0].sum() / w[y_tr == 1].sum()  # 類別平衡
     w /= w.mean()
-    s = train_mlp(x_tr, y_tr, np.concatenate([P[i, : n[i]] for i in te]), args, device, w_tr=w, logits=True)
+    s = train_mlp(x_tr, y_tr, np.concatenate([P[i, : n[i]] for i in te]), w, args, device)
     out = np.full((len(te), P.shape[1]), np.nan)
     for j, (i, o) in enumerate(zip(te, np.cumsum(n[te]) - n[te])):
         out[j, : n[i]] = s[o : o + n[i]]
