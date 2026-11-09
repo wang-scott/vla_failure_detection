@@ -1,0 +1,57 @@
+重跑評估並擷取解碼階段特徵（act_mean / act_prelogits）
+================================================================
+
+※ 請開一個「新的 terminal」執行，避免沿用舊的環境變數（舊的 nvidia-gl 設定會讓 EGL 找不到 GPU）。
+
+------------------------------------------------
+0. 啟用環境
+------------------------------------------------
+cd ~/vla
+source activate.sh
+cd eval_pi0fast
+
+# （可選）確認 EGL 看得到 GPU，印出的數字應 > 0
+python -c "from mujoco.egl import egl_ext; print(len(egl_ext.eglQueryDevicesEXT()))"
+
+------------------------------------------------
+1. 重跑評估（與上次相同的任務，輸出到新資料夾 outputs_act）
+------------------------------------------------
+# 時間很長，建議在 tmux 裡執行；斷線後用 tmux attach -t eval 回來
+tmux new -s eval
+python eval_pi0fast_libero_plus.py --per-category 20 --bddl-labels --save-features --output-dir outputs_act
+
+# 中斷後以相同指令重跑，會自動跳過已完成的批次
+# 只重新統計結果：
+python eval_pi0fast_libero_plus.py --analyze-only --output-dir outputs_act
+
+------------------------------------------------
+2. 逐層比較各種特徵（跑完評估後）
+------------------------------------------------
+# 預設為 sub_first + cumsum；加 --score prefix 可比較 prefix
+OUTPUTS_DIR=outputs_act python online_failure_detector.py --feature act_mean      --sweep --repeats 1 --xlsx sweep_act_mean.xlsx
+OUTPUTS_DIR=outputs_act python online_failure_detector.py --feature lm_mean       --sweep --repeats 1 --xlsx sweep_lm_mean.xlsx
+OUTPUTS_DIR=outputs_act python online_failure_detector.py --feature act_prelogits --layer 0
+
+# prefix 版本
+OUTPUTS_DIR=outputs_act python online_failure_detector.py --feature act_mean --sweep --repeats 1 --score prefix --xlsx sweep_act_mean_prefix.xlsx
+OUTPUTS_DIR=outputs_act python online_failure_detector.py --feature lm_mean  --sweep --repeats 1 --score prefix --xlsx sweep_lm_mean_prefix.xlsx
+
+# 未見任務（以基礎任務為單位切分），確認不是靠記住任務
+OUTPUTS_DIR=outputs_act python online_failure_detector.py --feature act_mean --sweep --repeats 1 --split task --xlsx sweep_act_mean_task.xlsx
+
+------------------------------------------------
+3. （可選）選定層後，輸出逐 episode 分數並產生標註影片
+------------------------------------------------
+# <L> 換成選定的層
+OUTPUTS_DIR=outputs_act python export_episode_scores.py --feature act_mean --layer <L> --out outputs_act/episode_scores_act_mean_L<L>
+OUTPUTS_DIR=outputs_act python render_detection_videos.py --scores outputs_act/episode_scores_act_mean_L<L>.csv
+# 影片輸出在 outputs_act/annotated_videos/episode_scores_act_mean_L<L>/
+
+------------------------------------------------
+附註
+------------------------------------------------
+- 新特徵：act_mean (C, 18, 2048)、act_prelogits (C, 1, 2048)、n_act_tokens (C,)，見 eval_pi0fast/pi0fast_features.py
+- 新評估是重新模擬，episode 可能與舊的 outputs/ 不完全相同，因此 lm_mean 也在 outputs_act 上重新比較
+- 已修正 LIBERO-plus Sensor Noise 的 np.float_ 錯誤（setup.sh 也會自動套用），新評估為 4 suite x 7 類別 x 20 = 560 個 episode；
+  舊的 outputs/ 缺少 Sensor Noise，只有 480 個
+- 舊的 nvidia-gl/ 已改名為 nvidia-gl.old-595.71.05（版本與目前驅動 595.91.07 不符）；要還原就改回原名

@@ -17,4 +17,9 @@ export MUJOCO_GL=egl
 if [ -d "$VLA_ROOT/nvidia-gl/root" ]; then
     export __EGL_VENDOR_LIBRARY_FILENAMES="$VLA_ROOT/nvidia-gl/root/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
     export LD_LIBRARY_PATH="$VLA_ROOT/nvidia-gl/root/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+elif [[ "${__EGL_VENDOR_LIBRARY_FILENAMES:-}" == "$VLA_ROOT/nvidia-gl/"* ]]; then
+    # nvidia-gl/ 已移除（例如驅動升級後改用系統的 EGL），清掉之前 source 留下的設定，否則 EGL 找不到任何 GPU
+    unset __EGL_VENDOR_LIBRARY_FILENAMES
+    LD_LIBRARY_PATH="$(echo "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -v "$VLA_ROOT/nvidia-gl/" | paste -sd:)"
+    export LD_LIBRARY_PATH
 fi

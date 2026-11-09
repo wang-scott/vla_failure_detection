@@ -1,2 +1,0 @@
-python eval_pi0fast_libero_plus.py --per-category 20 --bddl-labels --save-features
-python online_failure_detector.py --feature lm_mean --sweep --xlsx out.xlsx

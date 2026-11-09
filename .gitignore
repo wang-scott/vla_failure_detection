@@ -4,14 +4,17 @@
 /micromamba/
 /downloads/
 /nvidia-gl/
+/nvidia-gl.old-*/
 /lerobot/
 /LIBERO-plus/
 
-# 評測輸出：大型特徵檔與每批原始結果（只保留彙整後的 summary.md / results.csv / plan.json）
-/eval_pi0fast/outputs/*/
-/eval_pi0fast/outputs/*.npz
-/eval_pi0fast/outputs/*.npy
+# 評測輸出（outputs/、outputs_act/ 等 --output-dir）的大型檔案：
+# 各 suite 的原始結果／影片／特徵／標籤（每個 suite 約 1GB）、標註影片、特徵快取（每個約 1.8GB）
+# 最上層的小檔案（results.csv、summary.md、plan.json、episode_scores_*、log）保留
+/eval_pi0fast/outputs*/*/
+/eval_pi0fast/outputs*/*.npy
 /eval_pi0fast/smoke*/
+2506.09937v2*
 
 __pycache__/
 *.pyc
